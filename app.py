@@ -38,17 +38,30 @@ def init_db():
 def predict():
     crypto = request.args.get('crypto')
     price_str = request.args.get('price')
+    period = request.args.get('period')  # Новый параметр: '1m' или '24h'
 
-    if not crypto or not price_str:
-        return jsonify({'error': 'Missing crypto or price parameter'}), 400
+    if not crypto or not price_str or not period:
+        return jsonify({'error': 'Missing crypto, price, or period parameter'}), 400
+
+    if period not in ['1m', '24h']:
+        return jsonify({'error': 'Invalid period parameter. Use "1m" or "24h"'}), 400
 
     try:
         current_price = float(price_str)
         if crypto not in models:
             return jsonify({'error': 'Unsupported cryptocurrency'}), 400
 
-        # Запрашиваем данные за последние 10 дней (часовой интервал для соответствия обучению)
-        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={crypto}&tsym=USD&limit=240"  # 10 дней * 24 часа
+        # Определяем интервал данных в зависимости от периода
+        if period == '1m':
+            # Для прогноза на 1 минуту используем данные за последние 60 минут (минутный интервал)
+            url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={crypto}&tsym=USD&limit=60"
+            time_steps = 10  # Используем последние 10 минут для прогноза
+        else:  # period == '24h'
+            # Для прогноза на 24 часа используем данные за последние 10 дней (часовой интервал)
+            url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={crypto}&tsym=USD&limit=240"  # 10 дней * 24 часа
+            time_steps = 10  # Используем последние 10 часов для прогноза
+
+        # Запрашиваем исторические данные
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
@@ -56,17 +69,17 @@ def predict():
         if 'Data' not in data or 'Data' not in data['Data'] or not data['Data']['Data']:
             return jsonify({'error': 'Failed to fetch historical data'}), 500
 
-        # Извлекаем цены за последние 240 часов
+        # Извлекаем цены
         prices = [entry['close'] for entry in data['Data']['Data']]
 
         # Заменяем последнюю цену на текущую (переданную от расширения)
         prices[-1] = current_price
 
-        # Подготовка данных для модели (10 шагов)
+        # Подготовка данных для модели
         prices = np.array(prices).reshape(-1, 1)
         scaled_prices = scalers[crypto].transform(prices)
-        X = scaled_prices[-10:]  # Последние 10 шагов
-        X = X.reshape(1, 10, 1)  # Формат для LSTM: [samples, timesteps, features]
+        X = scaled_prices[-time_steps:]  # Последние time_steps шагов
+        X = X.reshape(1, time_steps, 1)  # Формат для LSTM: [samples, timesteps, features]
 
         # Делаем прогноз
         model = models[crypto]
@@ -76,10 +89,11 @@ def predict():
         # Отправка уведомления, если разница больше 5%
         price_diff = abs(predicted_price - current_price) / current_price * 100
         if price_diff > 5:
-            user_id = request.args.get('userId')  # Получаем userId из запроса (добавлен в script.js)
+            user_id = request.args.get('userId')  # Получаем userId из запроса (если есть)
             if user_id:
-                notification_message = f"Предупреждение по цене {crypto}: Цена может измениться на {price_diff:.2f}% за 1 день! Текущая: ${current_price}, Прогноз: ${predicted_price:.2f}"
-                send_telegram_notification(user_id, notification_message, 'ru')  # Язык по умолчанию, можно улучшить
+                period_text = "1 минуту" if period == '1m' else "24 часа"
+                notification_message = f"Предупреждение по цене {crypto}: Цена может измениться на {price_diff:.2f}% за {period_text}! Текущая: ${current_price}, Прогноз: ${predicted_price:.2f}"
+                send_telegram_notification(user_id, notification_message, 'ru')  # Язык по умолчанию
 
         return jsonify({'prediction': float(predicted_price)})
     except ValueError:
