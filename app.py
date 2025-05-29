@@ -8,7 +8,12 @@ import sqlite3
 import os
 
 app = Flask(__name__)
-CORS(app, resources={r"/predict": {"origins": "chrome-extension://pnfhoobelgilgafgacdnmebgohgknkdg"}})
+CORS(app, resources={r"/predict": {"origins": "chrome-extension://pnfhoobelgilgafgacdnmebgohgknkdg"},
+                    r"/get_chat_id": {"origins": "*"},
+                    r"/subscribe_telegram": {"origins": "*"}})
+
+# URL сервиса bot.py для отправки уведомлений
+TELEGRAM_NOTIFICATION_URL = "https://telegram-bot-x0i8.onrender.com/send_telegram_notification"
 
 # Загружаем модель и скейлер для каждой криптовалюты
 models = {
@@ -39,6 +44,7 @@ def predict():
     crypto = request.args.get('crypto')
     price_str = request.args.get('price')
     period = request.args.get('period')  # Новый параметр: '1m' или '24h'
+    user_id = request.args.get('userId')  # Получаем userId из запроса
 
     if not crypto or not price_str or not period:
         return jsonify({'error': 'Missing crypto, price, or period parameter'}), 400
@@ -91,14 +97,28 @@ def predict():
         predicted_price = scalers[crypto].inverse_transform(predicted_scaled)[0][0]
         print(f"Прогноз (масштабированный): {predicted_scaled}, Прогноз (обратное масштабирование): {predicted_price}")
 
+        # Простая корректировка: если текущая цена выше среднего за последние 10 шагов, добавляем небольшой рост
+        last_10_prices = prices[-10:].flatten()
+        avg_price = np.mean(last_10_prices)
+        if current_price > avg_price:
+            predicted_price = current_price + (current_price - avg_price) * 0.1  # Увеличиваем на 10% разницы
+            print(f"Корректировка прогноза (рост): {predicted_price}")
+
         # Отправка уведомления, если разница больше 5%
         price_diff = abs(predicted_price - current_price) / current_price * 100
-        if price_diff > 5:
-            user_id = request.args.get('userId')  # Получаем userId из запроса (если есть)
-            if user_id:
-                period_text = "1 минуту" if period == '1m' else "24 часа"
-                notification_message = f"Предупреждение по цене {crypto}: Цена может измениться на {price_diff:.2f}% за {period_text}! Текущая: ${current_price}, Прогноз: ${predicted_price:.2f}"
-                send_telegram_notification(user_id, notification_message, 'ru')  # Язык по умолчанию
+        if price_diff > 5 and user_id:
+            period_text = "1 минуту" if period == '1m' else "24 часа"
+            notification_message = f"Предупреждение по цене {crypto}: Цена может измениться на {price_diff:.2f}% за {period_text}! Текущая: ${current_price}, Прогноз: ${predicted_price:.2f}"
+            # Отправляем запрос на bot.py для уведомления
+            try:
+                response = requests.post(
+                    TELEGRAM_NOTIFICATION_URL,
+                    params={'userId': user_id, 'message': notification_message, 'lang': 'ru'}
+                )
+                response.raise_for_status()
+                print(f"Уведомление отправлено через bot.py: {response.json()}")
+            except requests.RequestException as e:
+                print(f"Ошибка при отправке уведомления через bot.py: {str(e)}")
 
         return jsonify({'prediction': float(predicted_price)})
     except ValueError:
@@ -108,36 +128,22 @@ def predict():
     except Exception as e:
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
-@app.route('/favicon.ico')
-def favicon():
-    return make_response('', 204)
+# Эндпоинт для получения chat_id
+@app.route('/get_chat_id', methods=['GET'])
+def get_chat_id():
+    user_id = request.args.get('userId')
+    if not user_id:
+        return jsonify({'ok': False, 'message': 'Missing userId'}), 400
 
-# Эндпоинт для отправки уведомлений
-def send_telegram_notification(user_id, message, lang):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute("SELECT chat_id FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
+    conn.close()
 
     if result:
-        chat_id = result[0]
-        TELEGRAM_BOT_TOKEN = '8176459174:AAHYP9fGzmGbnoUnmTplk7OxUGyeEuTqA5U'
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            'chat_id': chat_id,
-            'text': message,
-            'parse_mode': 'Markdown'
-        }
-        try:
-            response = requests.post(url, data=payload)
-            data = response.json()
-            if not data.get('ok'):
-                print(f'Ошибка отправки в Telegram: {data.get("description")}')
-        except Exception as e:
-            print(f'Ошибка при отправке уведомления: {str(e)}')
-    else:
-        print(f'Пользователь {user_id} не подписан на уведомления')
-    conn.close()
+        return jsonify({'ok': True, 'chat_id': result[0]})
+    return jsonify({'ok': False, 'message': 'User not found'}), 404
 
 # Эндпоинт для обработки подписки от бота
 @app.route('/subscribe_telegram', methods=['POST'])
@@ -146,7 +152,7 @@ def subscribe_telegram():
     chat_id = request.args.get('chatId')
 
     if not user_id or not chat_id:
-        return jsonify({'ok': False, 'message': 'Missing userId or chatId'}), 400
+        return jsonify({'ok': false, 'message': 'Missing userId or chatId'}), 400
 
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
@@ -154,6 +160,10 @@ def subscribe_telegram():
     conn.commit()
     conn.close()
     return jsonify({'ok': True, 'message': 'Subscribed successfully'})
+
+@app.route('/favicon.ico')
+def favicon():
+    return make_response('', 204)
 
 if __name__ == '__main__':
     init_db()  # Инициализируем базу данных при запуске
