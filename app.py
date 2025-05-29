@@ -53,38 +53,43 @@ def predict():
 
         # Определяем интервал данных в зависимости от периода
         if period == '1m':
-            # Для прогноза на 1 минуту используем данные за последние 60 минут (минутный интервал)
-            url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={crypto}&tsym=USD&limit=60"
+            # Для прогноза на 1 минуту используем данные за последние 120 минут (минутный интервал)
+            url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={crypto}&tsym=USD&limit=120"
             time_steps = 10  # Используем последние 10 минут для прогноза
         else:  # period == '24h'
-            # Для прогноза на 24 часа используем данные за последние 10 дней (часовой интервал)
-            url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={crypto}&tsym=USD&limit=240"  # 10 дней * 24 часа
+            # Для прогноза на 24 часа используем данные за последние 20 дней (часовой интервал)
+            url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={crypto}&tsym=USD&limit=480"  # 20 дней * 24 часа
             time_steps = 10  # Используем последние 10 часов для прогноза
 
         # Запрашиваем исторические данные
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
+        print(f"Получены данные для {crypto}: {len(data['Data']['Data'])} записей")
 
         if 'Data' not in data or 'Data' not in data['Data'] or not data['Data']['Data']:
             return jsonify({'error': 'Failed to fetch historical data'}), 500
 
         # Извлекаем цены
         prices = [entry['close'] for entry in data['Data']['Data']]
+        print(f"Цены за последние шаги: {prices[-10:]}")  # Выводим последние 10 цен
 
         # Заменяем последнюю цену на текущую (переданную от расширения)
         prices[-1] = current_price
+        print(f"Текущая цена {crypto}: {current_price}")
 
         # Подготовка данных для модели
         prices = np.array(prices).reshape(-1, 1)
         scaled_prices = scalers[crypto].transform(prices)
         X = scaled_prices[-time_steps:]  # Последние time_steps шагов
+        print(f"Масштабированные данные для прогноза: {X.flatten()}")
         X = X.reshape(1, time_steps, 1)  # Формат для LSTM: [samples, timesteps, features]
 
         # Делаем прогноз
         model = models[crypto]
         predicted_scaled = model.predict(X, verbose=0)
         predicted_price = scalers[crypto].inverse_transform(predicted_scaled)[0][0]
+        print(f"Прогноз (масштабированный): {predicted_scaled}, Прогноз (обратное масштабирование): {predicted_price}")
 
         # Отправка уведомления, если разница больше 5%
         price_diff = abs(predicted_price - current_price) / current_price * 100
